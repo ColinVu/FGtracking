@@ -20,6 +20,9 @@ from dataclasses import dataclass
 import argparse
 from scipy.optimize import least_squares
 import math
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 
 @dataclass
@@ -131,11 +134,20 @@ class FootballTracker:
         self.field_points: List[FieldPoint] = []
         self.positions_3d: List[Position3D] = []
         
-        # Camera calibration
+        # Camera calibration (initial/reference)
         self.homography = None
         self.camera_matrix = None
         self.rotation_matrix = None
         self.translation_vector = None
+        
+        # Dynamic camera tracking
+        self.frame_homographies: List[np.ndarray] = []  # Homography for each frame
+        self.frame_camera_matrices: List[np.ndarray] = []  # Camera matrix for each frame
+        self.reference_features = None  # Field features from calibration frame
+        
+        # Trajectory analysis
+        self.crossing_point_y = None  # Y position when Z=3.33 on downward swing
+        self.trajectory_data = []  # Store (Y, Z) pairs for graphing
         
         # Tracking components
         self.kalman_filter = KalmanFilter()
@@ -519,7 +531,7 @@ class FootballTracker:
     
     def image_to_3d_ballistic(self, image_points_with_time: List[Tuple[Tuple[int, int], float]]) -> List[Position3D]:
         """
-        Convert image points to 3D using ballistic trajectory fitting
+        Convert image points to 3D using ballistic trajectory fitting with dynamic camera tracking
         
         Args:
             image_points_with_time: List of ((u, v), time_seconds) tuples
@@ -529,6 +541,14 @@ class FootballTracker:
         """
         if self.homography is None or len(image_points_with_time) < 3:
             return []
+        
+        # Use frame-specific homographies if available
+        use_dynamic_camera = len(self.frame_homographies) > 0
+        
+        if use_dynamic_camera:
+            print(f"Using dynamic camera tracking with {len(self.frame_homographies)} frame-specific homographies")
+        else:
+            print("Using static camera model")
         
         def ballistic_model(params, times):
             """Ballistic trajectory model: P(t) = P0 + V0*t + 0.5*g*t^2"""
@@ -545,27 +565,55 @@ class FootballTracker:
             return np.array(positions)
         
         def residual_function(params):
-            """Residual function for optimization"""
+            """Residual function for optimization with dynamic camera parameters"""
             times = [t for _, t in image_points_with_time]
             predicted_3d = ballistic_model(params, times)
             
             residuals = []
-            for i, ((u, v), _) in enumerate(image_points_with_time):
+            for i, ((u, v), t) in enumerate(image_points_with_time):
                 # Project 3D point to image
                 point_3d = predicted_3d[i]
                 
-                # Transform to camera coordinates
-                point_cam = self.rotation_matrix @ point_3d + self.translation_vector
-                
-                # Project to image
-                if point_cam[2] > 0:  # In front of camera
-                    projected = self.camera_matrix @ point_cam
-                    u_proj = projected[0] / projected[2]
-                    v_proj = projected[1] / projected[2]
-                    
-                    residuals.extend([u - u_proj, v - v_proj])
+                # Get frame-specific camera parameters if available
+                if use_dynamic_camera:
+                    frame_num = int(t * self.fps)
+                    if 0 <= frame_num < len(self.frame_homographies):
+                        # Use frame-specific homography for projection
+                        # For simplicity, use homography-based projection
+                        point_ground = np.array([point_3d[0], point_3d[2], 1], dtype=np.float32)  # X, Z, 1
+                        frame_homography = self.frame_homographies[frame_num]
+                        
+                        try:
+                            projected_2d = np.linalg.inv(frame_homography) @ point_ground
+                            if abs(projected_2d[2]) > 1e-6:
+                                projected_2d = projected_2d / projected_2d[2]
+                                u_proj, v_proj = projected_2d[0], projected_2d[1]
+                                
+                                # Adjust for height (simplified)
+                                height_offset = point_3d[1] * 10  # Rough height-to-pixel conversion
+                                v_proj -= height_offset
+                                
+                                residuals.extend([u - u_proj, v - v_proj])
+                            else:
+                                residuals.extend([1000, 1000])
+                        except:
+                            residuals.extend([1000, 1000])
+                    else:
+                        residuals.extend([1000, 1000])
                 else:
-                    residuals.extend([1000, 1000])  # Large error for points behind camera
+                    # Use static camera model
+                    # Transform to camera coordinates
+                    point_cam = self.rotation_matrix @ point_3d + self.translation_vector
+                    
+                    # Project to image
+                    if point_cam[2] > 0:  # In front of camera
+                        projected = self.camera_matrix @ point_cam
+                        u_proj = projected[0] / projected[2]
+                        v_proj = projected[1] / projected[2]
+                        
+                        residuals.extend([u - u_proj, v - v_proj])
+                    else:
+                        residuals.extend([1000, 1000])  # Large error for points behind camera
             
             return np.array(residuals)
         
@@ -575,9 +623,20 @@ class FootballTracker:
         
         for (u, v), t in image_points_with_time:
             try:
-                # Project to ground plane using homography
+                # Project to ground plane using appropriate homography
                 point_img = np.array([u, v, 1], dtype=np.float32)
-                point_ground = self.homography @ point_img
+                
+                # Use frame-specific homography if available
+                if use_dynamic_camera:
+                    frame_num = int(t * self.fps)
+                    if 0 <= frame_num < len(self.frame_homographies):
+                        current_homography = self.frame_homographies[frame_num]
+                    else:
+                        current_homography = self.homography
+                else:
+                    current_homography = self.homography
+                
+                point_ground = current_homography @ point_img
                 
                 # Check for valid homography result
                 if abs(point_ground[2]) > 1e-6:
@@ -680,6 +739,366 @@ class FootballTracker:
                 print(f"Fallback method also failed: {fallback_error}")
         
         return []
+    
+    def detect_field_features(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Detect field features (yard lines, hash marks) for camera tracking
+        
+        Args:
+            frame: Input frame
+            
+        Returns:
+            Array of detected feature points
+        """
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Enhance contrast to make field lines more visible
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(gray)
+        
+        # Detect edges using Canny
+        edges = cv2.Canny(enhanced, 50, 150, apertureSize=3)
+        
+        # Detect lines using Hough transform
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, 
+                               minLineLength=50, maxLineGap=10)
+        
+        if lines is None:
+            return np.array([])
+        
+        # Filter for horizontal lines (yard lines) and vertical lines (hash marks)
+        field_features = []
+        
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            
+            # Calculate line angle
+            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+            length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            
+            # Keep horizontal lines (yard lines) - within 15 degrees of horizontal
+            if (abs(angle) < 15 or abs(angle - 180) < 15 or abs(angle + 180) < 15) and length > 100:
+                # Add endpoints as features
+                field_features.extend([(x1, y1), (x2, y2)])
+            
+            # Keep vertical lines (hash marks) - within 15 degrees of vertical
+            elif (abs(angle - 90) < 15 or abs(angle + 90) < 15) and length > 30:
+                # Add endpoints as features
+                field_features.extend([(x1, y1), (x2, y2)])
+        
+        # Use corner detection for additional features
+        corners = cv2.goodFeaturesToTrack(enhanced, maxCorners=100, 
+                                         qualityLevel=0.01, minDistance=10)
+        
+        if corners is not None:
+            corners = corners.reshape(-1, 2)
+            field_features.extend([(int(x), int(y)) for x, y in corners])
+        
+        # Remove duplicates and convert to numpy array
+        if field_features:
+            unique_features = list(set(field_features))
+            return np.array(unique_features, dtype=np.float32)
+        else:
+            return np.array([])
+    
+    def estimate_frame_homography(self, frame: np.ndarray, reference_features: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Estimate homography for current frame relative to reference frame
+        
+        Args:
+            frame: Current frame
+            reference_features: Features from reference frame
+            
+        Returns:
+            Homography matrix or None if estimation fails
+        """
+        if reference_features.size == 0:
+            return None
+        
+        # Detect features in current frame
+        current_features = self.detect_field_features(frame)
+        
+        if current_features.size == 0 or len(current_features) < 4:
+            return None
+        
+        try:
+            # Match features between reference and current frame using FLANN matcher
+            # Convert to keypoints for matching
+            ref_kp = [cv2.KeyPoint(x, y, 1) for x, y in reference_features]
+            cur_kp = [cv2.KeyPoint(x, y, 1) for x, y in current_features]
+            
+            # Use ORB detector for descriptors
+            orb = cv2.ORB_create()
+            
+            # Compute descriptors
+            ref_gray = cv2.cvtColor(self.reference_frame if hasattr(self, 'reference_frame') else frame, cv2.COLOR_BGR2GRAY)
+            cur_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            _, ref_desc = orb.compute(ref_gray, ref_kp)
+            _, cur_desc = orb.compute(cur_gray, cur_kp)
+            
+            if ref_desc is None or cur_desc is None:
+                return None
+            
+            # Match descriptors
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            matches = bf.match(ref_desc, cur_desc)
+            
+            if len(matches) < 4:
+                return None
+            
+            # Sort matches by distance
+            matches = sorted(matches, key=lambda x: x.distance)
+            
+            # Extract matched points
+            ref_points = np.array([reference_features[m.queryIdx] for m in matches[:20]], dtype=np.float32)
+            cur_points = np.array([current_features[m.trainIdx] for m in matches[:20]], dtype=np.float32)
+            
+            # Compute homography
+            homography, mask = cv2.findHomography(cur_points, ref_points, 
+                                                 cv2.RANSAC, 5.0)
+            
+            return homography
+            
+        except Exception as e:
+            print(f"Warning: Failed to estimate homography for frame: {e}")
+            return None
+    
+    def track_camera_motion(self):
+        """
+        Track camera motion throughout the video using field features
+        This runs after ball tracking but before 3D position calculation
+        """
+        if self.homography is None:
+            print("No initial calibration available for camera tracking")
+            return
+        
+        print("Phase 2.5: Tracking Camera Motion")
+        print("Analyzing field features to detect camera movement...")
+        
+        # Store reference frame features from calibration
+        cap = cv2.VideoCapture(self.input_video_path)
+        ret, reference_frame = cap.read()
+        
+        if ret:
+            self.reference_frame = reference_frame
+            self.reference_features = self.detect_field_features(reference_frame)
+            print(f"Detected {len(self.reference_features)} reference features")
+        else:
+            print("Failed to read reference frame")
+            cap.release()
+            return
+        
+        # Initialize frame-specific camera parameters
+        self.frame_homographies = []
+        self.frame_camera_matrices = []
+        
+        frame_count = 0
+        successful_tracks = 0
+        
+        # Process each frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Reset to beginning
+        
+        while frame_count < self.total_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if frame_count == 0:
+                # Use original calibration for first frame
+                self.frame_homographies.append(self.homography.copy())
+                self.frame_camera_matrices.append(self.camera_matrix.copy())
+            else:
+                # Estimate homography for current frame
+                frame_homography = self.estimate_frame_homography(frame, self.reference_features)
+                
+                if frame_homography is not None:
+                    # Combine with reference homography to get field-to-image mapping
+                    combined_homography = frame_homography @ self.homography
+                    self.frame_homographies.append(combined_homography)
+                    
+                    # Update camera matrix based on homography change
+                    # For simplicity, keep same camera matrix but could be refined
+                    self.frame_camera_matrices.append(self.camera_matrix.copy())
+                    successful_tracks += 1
+                else:
+                    # Fallback to previous frame's parameters
+                    if self.frame_homographies:
+                        self.frame_homographies.append(self.frame_homographies[-1].copy())
+                        self.frame_camera_matrices.append(self.frame_camera_matrices[-1].copy())
+                    else:
+                        self.frame_homographies.append(self.homography.copy())
+                        self.frame_camera_matrices.append(self.camera_matrix.copy())
+            
+            frame_count += 1
+            
+            # Progress indicator
+            if frame_count % 100 == 0:
+                print(f"Processed {frame_count}/{self.total_frames} frames for camera tracking")
+        
+        cap.release()
+        
+        success_rate = successful_tracks / max(1, frame_count - 1) * 100
+        print(f"Camera tracking complete: {successful_tracks}/{frame_count-1} frames tracked successfully ({success_rate:.1f}%)")
+        
+        if success_rate < 30:
+            print("Warning: Low camera tracking success rate. 3D positions may be less accurate.")
+            print("Consider using a video with more stable field features or less camera movement.")
+    
+    def analyze_trajectory(self):
+        """Analyze trajectory data to find crossing points and prepare for visualization"""
+        if not self.positions_3d:
+            return
+        
+        print("Analyzing trajectory for crossing points...")
+        
+        # Extract Y (forward/backward) and Z (height) values
+        self.trajectory_data = [(pos.z, pos.y) for pos in self.positions_3d]  # (forward, height)
+        
+        # Find crossing point where Z (height) = 3.33 yards on downward swing
+        self.find_height_crossing_point()
+    
+    def find_height_crossing_point(self):
+        """Find Y position when Z=3.33 yards on the downward swing"""
+        target_height = 3.33  # yards
+        
+        if len(self.positions_3d) < 3:
+            print("Insufficient trajectory data for crossing point analysis")
+            return
+        
+        # Find the peak (maximum height)
+        heights = [pos.y for pos in self.positions_3d]
+        max_height_idx = np.argmax(heights)
+        max_height = heights[max_height_idx]
+        
+        print(f"Peak height: {max_height:.1f} yards at frame {self.positions_3d[max_height_idx].frame_num}")
+        
+        if max_height < target_height:
+            print(f"Peak height ({max_height:.1f}yd) is below target height ({target_height}yd)")
+            return
+        
+        # Look for crossing point on downward swing (after peak)
+        for i in range(max_height_idx + 1, len(self.positions_3d) - 1):
+            current_height = self.positions_3d[i].y
+            next_height = self.positions_3d[i + 1].y
+            
+            # Check if we cross the target height between these two points
+            if current_height >= target_height >= next_height:
+                # Linear interpolation to find exact crossing point
+                current_y = self.positions_3d[i].z  # forward/backward position
+                next_y = self.positions_3d[i + 1].z
+                
+                # Interpolation factor
+                t = (target_height - next_height) / (current_height - next_height)
+                crossing_y = next_y + t * (current_y - next_y)
+                
+                self.crossing_point_y = crossing_y
+                crossing_frame = self.positions_3d[i].frame_num + t * (self.positions_3d[i + 1].frame_num - self.positions_3d[i].frame_num)
+                
+                print(f"Crossing point found: Y={crossing_y:.2f} yards when Z={target_height} yards")
+                print(f"Occurs at approximately frame {crossing_frame:.1f}")
+                return
+        
+        print(f"No crossing point found at {target_height} yards on downward swing")
+    
+    def create_trajectory_graph(self, current_frame: int, graph_width: int = 400, graph_height: int = 300) -> np.ndarray:
+        """
+        Create a real-time trajectory graph showing Y vs Z
+        
+        Args:
+            current_frame: Current frame number for highlighting current position
+            graph_width: Width of the graph in pixels
+            graph_height: Height of the graph in pixels
+            
+        Returns:
+            Graph image as numpy array
+        """
+        try:
+            # Create matplotlib figure
+            plt.style.use('dark_background')
+            fig, ax = plt.subplots(figsize=(graph_width/100, graph_height/100), dpi=100)
+            fig.patch.set_facecolor('black')
+            ax.set_facecolor('black')
+            
+            if not self.trajectory_data:
+                # Empty graph
+                ax.text(0.5, 0.5, 'No Trajectory Data', transform=ax.transAxes, 
+                       ha='center', va='center', color='white', fontsize=12)
+                ax.set_xlim(0, 100)
+                ax.set_ylim(0, 20)
+            else:
+                # Extract data up to current frame
+                current_data = []
+                for pos in self.positions_3d:
+                    if pos.frame_num <= current_frame:
+                        current_data.append((pos.z, pos.y))  # (forward, height)
+                
+                if current_data:
+                    y_vals, z_vals = zip(*current_data)
+                    
+                    # Plot trajectory
+                    ax.plot(y_vals, z_vals, 'cyan', linewidth=2, alpha=0.8, label='Trajectory')
+                    
+                    # Highlight current position
+                    if current_data:
+                        ax.plot(y_vals[-1], z_vals[-1], 'red', marker='o', markersize=8, label='Current')
+                    
+                    # Add target height line
+                    y_range = ax.get_xlim()
+                    ax.axhline(y=3.33, color='yellow', linestyle='--', alpha=0.7, label='Target Height (3.33yd)')
+                    
+                    # Add crossing point if found
+                    if self.crossing_point_y is not None:
+                        ax.plot(self.crossing_point_y, 3.33, 'lime', marker='*', markersize=12, 
+                               label=f'Crossing: {self.crossing_point_y:.1f}yd')
+                    
+                    # Set labels and limits
+                    ax.set_xlabel('Forward Distance (yards)', color='white')
+                    ax.set_ylabel('Height (yards)', color='white')
+                    ax.grid(True, alpha=0.3)
+                    ax.legend(loc='upper right', fontsize=8)
+                    
+                    # Set reasonable axis limits
+                    y_min, y_max = min(y_vals), max(y_vals)
+                    z_min, z_max = min(z_vals), max(z_vals)
+                    ax.set_xlim(y_min - 5, y_max + 5)
+                    ax.set_ylim(max(0, z_min - 2), z_max + 2)
+            
+            ax.set_title('Ball Trajectory (Forward vs Height)', color='white', fontsize=10)
+            ax.tick_params(colors='white')
+            
+            # Convert to image
+            canvas = FigureCanvasAgg(fig)
+            canvas.draw()
+            
+            # Use the newer buffer_rgba method
+            try:
+                # Try newer method first
+                buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
+                buf = buf.reshape(canvas.get_width_height()[::-1] + (4,))
+                # Convert RGBA to RGB
+                buf = buf[:, :, :3]
+            except AttributeError:
+                try:
+                    # Fallback to older method
+                    buf = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
+                    buf = buf.reshape(canvas.get_width_height()[::-1] + (3,))
+                except AttributeError:
+                    # Final fallback
+                    buf = np.array(canvas.renderer.buffer_rgba())
+                    buf = buf.reshape(canvas.get_width_height()[::-1] + (4,))
+                    buf = buf[:, :, :3]
+            
+            plt.close(fig)
+        
+            # Convert RGB to BGR for OpenCV
+            return cv2.cvtColor(buf, cv2.COLOR_RGB2BGR)
+            
+        except Exception as e:
+            print(f"Warning: Failed to create trajectory graph: {e}")
+            # Return a black image as fallback
+            return np.zeros((graph_height, graph_width, 3), dtype=np.uint8)
     
     def refine_annotation(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
         """
@@ -904,10 +1323,18 @@ class FootballTracker:
         self.cap.release()
         print(f"Tracking complete. Processed {frame_count} frames.")
         
+        # Track camera motion using field features
+        if self.homography is not None:
+            self.track_camera_motion()
+        
         # Compute 3D positions using ballistic trajectory fitting
         if self.homography is not None:
             print("Computing 3D trajectory...")
             self.compute_3d_trajectory()
+            
+            # Analyze trajectory for crossing points
+            if self.positions_3d:
+                self.analyze_trajectory()
         else:
             print("3D trajectory computation skipped (no valid calibration)")
     
@@ -1019,6 +1446,34 @@ class FootballTracker:
             # Add frame information
             cv2.putText(frame, f"Frame: {frame_count}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Add trajectory graph if 3D data is available
+            if self.positions_3d:
+                graph = self.create_trajectory_graph(frame_count, 400, 300)
+                
+                # Position graph in top-right corner
+                graph_h, graph_w = graph.shape[:2]
+                frame_h, frame_w = frame.shape[:2]
+                
+                # Ensure graph fits in frame
+                if graph_w <= frame_w and graph_h <= frame_h:
+                    x_offset = frame_w - graph_w - 10
+                    y_offset = 10
+                    
+                    # Overlay graph on frame
+                    frame[y_offset:y_offset+graph_h, x_offset:x_offset+graph_w] = graph
+                
+                # Add crossing point information
+                if self.crossing_point_y is not None:
+                    crossing_text = f"Crossing at 3.33yd height: {self.crossing_point_y:.2f}yd forward"
+                    cv2.putText(frame, crossing_text, (10, frame_h - 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+                    
+                    # Add background rectangle for better visibility
+                    text_size = cv2.getTextSize(crossing_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    cv2.rectangle(frame, (5, frame_h - 50), (text_size[0] + 15, frame_h - 10), (0, 0, 0), -1)
+                    cv2.putText(frame, crossing_text, (10, frame_h - 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
             
             # Write frame to output video
             out.write(frame)

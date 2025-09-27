@@ -68,6 +68,7 @@ python football_tracker.py --input your_video.mp4 --output result.mp4 --bbox-siz
 - Linear interpolation between annotations (never after the last annotation)
 - CSRT tracker fills gaps where interpolation isn't possible
 - Kalman filter smooths the trajectory
+- **Dynamic camera motion tracking** using field features (NEW!)
 - **3D ballistic trajectory fitting** using physics-based model
 - Real-world position calculation in yards (X, Y, Z coordinates)
 
@@ -79,6 +80,8 @@ python football_tracker.py --input your_video.mp4 --output result.mp4 --bbox-siz
   - **Real-time 3D coordinates display**:
     - Height and downfield position in yards
     - Lateral position as relative movement
+  - **Live trajectory graph** (Forward vs Height) in top-right corner (NEW!)
+  - **Crossing point analysis**: Shows forward position when ball reaches 3.33yd height (NEW!)
   - Frame counter overlay
 
 ## Technical Details
@@ -105,6 +108,7 @@ The system uses HSV color space to detect football color:
 - OpenCV 4.8.0+
 - NumPy 1.21.0+
 - SciPy 1.9.0+ (for 3D trajectory optimization)
+- Matplotlib 3.5.0+ (for trajectory graphing)
 
 ## Example Workflow
 
