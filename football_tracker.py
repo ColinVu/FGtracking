@@ -214,7 +214,7 @@ class FootballTracker:
         print("Phase 1: Interactive Annotation")
         print("Instructions:")
         print("- Click on the football to annotate it")
-        print("- Press 'g' to mark next click as BEGINNING point (green) - starting position")
+        print("- Press 'g' to mark next click as BEGINNING point (green) - you'll enter yard line manually")
         print("- Press 'h' to mark next click as END point (red) - ending position for distance calc")
         print("- Press 's' to skip current frame")
         print("- Press 'r' to remove annotation from current frame")
@@ -225,7 +225,7 @@ class FootballTracker:
         print("  HOME: Go to first frame")
         print("  END: Go to last frame")
         print("- Press SPACE to pause/resume navigation")
-        print("- Both points will be analyzed using CV field line detection for yard positions")
+        print("- Beginning position: manual input | End position: CV field line detection")
         print("- END point will be used as manual calibration at height=0 for distance calculation")
         
         if not os.path.exists(self.input_video_path):
@@ -386,6 +386,15 @@ class FootballTracker:
                         self.annotations = [ann for ann in self.annotations if ann.point_type != "beginning"]
                     self.beginning_point = annotation
                     print(f"Set BEGINNING point at frame {current_frame}, position {center}")
+                    
+                    # Ask user for manual yard line input
+                    try:
+                        yard_line = float(input(f"Enter the yard line for this starting position (e.g., 25 for 25-yard line): "))
+                        self.starting_position = yard_line
+                        print(f"Starting position manually set to {yard_line:.1f} yard line")
+                    except ValueError:
+                        print("Invalid input. Starting position not set - you can enter it later.")
+                        self.starting_position = None
                 elif self.pending_point_type == "end":
                     if self.end_point is not None:
                         # Remove previous end point
@@ -1609,17 +1618,7 @@ class FootballTracker:
             self.calculated_distance = result
         return result
     
-    def calculate_starting_position(self) -> Optional[float]:
-        """
-        Calculate the starting position of the beginning point using CV-based field line detection
-        
-        Returns:
-            Estimated starting yard line position, or None if calculation fails
-        """
-        result = self.calculate_position_from_point(self.beginning_point, "beginning point")
-        if result is not None:
-            self.starting_position = result
-        return result
+    # Note: Starting position is now manually entered by user when marking beginning point
     
     def create_trajectory_graph(self, current_frame: int, graph_width: int = 400, graph_height: int = 300) -> np.ndarray:
         """
@@ -1957,15 +1956,13 @@ class FootballTracker:
         # Calculate positions using CV-based field line detection
         print("\n=== POSITION ANALYSIS USING CV FIELD LINE DETECTION ===")
         
-        # Calculate starting position
-        if self.beginning_point is not None:
-            starting_position = self.calculate_starting_position()
-            if starting_position is not None:
-                print(f"\nStarting position: {starting_position:.1f} yard line")
-            else:
-                print("Starting position calculation failed")
+        # Display starting position (manually entered)
+        if self.beginning_point is not None and self.starting_position is not None:
+            print(f"\nStarting position: {self.starting_position:.1f} yard line (manually entered)")
+        elif self.beginning_point is not None:
+            print("\nBeginning point marked but starting position not entered")
         else:
-            print("\nNo beginning point marked - skipping starting position calculation")
+            print("\nNo beginning point marked - skipping starting position")
             print("Use 'g' key during annotation to mark a beginning point")
         
         # Calculate ending position using end point as manual calibration
@@ -2102,14 +2099,15 @@ class FootballTracker:
                         text_x = center[0] + 20
                         text_y = center[1] - 10
                         
-                        # Position text - focus on height and downfield position
-                        pos_text = f"Height:{closest_pos.y:.1f}yd  Downfield:{closest_pos.z:.1f}yd"
+                        # Position text - show only height (downfield and lateral commented out)
+                        pos_text = f"Height:{closest_pos.y:.1f}yd"
                         cv2.putText(frame, pos_text, (text_x, text_y), 
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1, cv2.LINE_AA)
                         
-                        # Add lateral position as relative info
-                        cv2.putText(frame, f"Lateral:{closest_pos.x:+.1f}yd", (text_x, text_y + 15), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1, cv2.LINE_AA)
+                        # Downfield and lateral coordinates commented out as requested
+                        # pos_text = f"Height:{closest_pos.y:.1f}yd  Downfield:{closest_pos.z:.1f}yd"
+                        # cv2.putText(frame, f"Lateral:{closest_pos.x:+.1f}yd", (text_x, text_y + 15), 
+                        #            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1, cv2.LINE_AA)
             
             # Draw trajectory
             valid_points = [p for p in self.trajectory_points[:frame_count+1] if p is not None]
@@ -2248,9 +2246,9 @@ class FootballTracker:
             print(f"\n*** FIELD POSITION ANALYSIS RESULTS ***")
             
             if self.starting_position is not None:
-                print(f"Starting position: {self.starting_position:.1f} yard line")
+                print(f"Starting position: {self.starting_position:.1f} yard line (manually entered)")
             else:
-                print("Starting position: Not calculated (no beginning point marked)")
+                print("Starting position: Not entered (no beginning point marked or position not entered)")
             
             if self.calculated_distance is not None:
                 if self.calculated_distance < 0:
@@ -2273,7 +2271,7 @@ class FootballTracker:
                     print(f"\n🏈 TOTAL KICK DISTANCE: {total_distance:.1f} YARDS 🏈")
                     print(f"   From {self.starting_position:.1f}yd line → {self.calculated_distance:.1f}yd line")
             
-            print("\n(Analysis based on CV field line detection with manual calibration)")
+            print("\n(Starting position: manual input | Ending position: CV field line detection)")
             
             print(f"\nOutput video: {self.output_video_path}")
             
