@@ -1,10 +1,10 @@
-# Semi-Automatic Football Tracking System
+# Semi-Automatic Football Tracking System for Field Goals
 
 A Python-based computer vision system for tracking a football in video files using OpenCV. The system combines user annotation with automated tracking algorithms to provide accurate and smooth football trajectory tracking.
 
 ## Features
 
-- **Interactive Annotation**: User-guided annotation on every 5th frame
+- **Interactive Annotation**: User-guided annotation on every frame
 - **Automated Refinement**: Color-based detection to refine user annotations
 - **CSRT Tracking**: Advanced tracking between annotated frames
 - **Kalman Filtering**: Smooth trajectory prediction and filtering
