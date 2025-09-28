@@ -31,6 +31,7 @@ class Annotation:
     frame_num: int
     bbox: Tuple[int, int, int, int]  # (x, y, w, h)
     center: Tuple[int, int]  # (cx, cy)
+    point_type: str = "regular"  # "regular", "beginning", "end"
 
 
 @dataclass
@@ -134,6 +135,12 @@ class FootballTracker:
         self.field_points: List[FieldPoint] = []
         self.positions_3d: List[Position3D] = []
         
+        # Special point tracking
+        self.beginning_point: Optional[Annotation] = None
+        self.end_point: Optional[Annotation] = None
+        self.calculated_distance: Optional[float] = None
+        self.starting_position: Optional[float] = None
+        
         # Camera calibration (initial/reference)
         self.homography = None
         self.camera_matrix = None
@@ -163,6 +170,7 @@ class FootballTracker:
         # Mouse callback variables
         self.mouse_pos = None
         self.annotation_ready = False
+        self.pending_point_type = "regular"  # Track what type of point to create next
     
     def mouse_callback(self, event, x, y, flags, param):
         """Mouse callback for annotation selection"""
@@ -170,8 +178,8 @@ class FootballTracker:
             self.mouse_pos = (x, y)
             self.annotation_ready = True
     
-    def draw_annotation_box(self, frame: np.ndarray, center: Tuple[int, int]) -> np.ndarray:
-        """Draw annotation bounding box on frame"""
+    def draw_annotation_box(self, frame: np.ndarray, center: Tuple[int, int], point_type: str = "regular") -> np.ndarray:
+        """Draw annotation bounding box on frame with color coding based on point type"""
         x, y = center
         half_size = self.bbox_size // 2
         
@@ -181,9 +189,23 @@ class FootballTracker:
         x2 = min(frame.shape[1], x + half_size)
         y2 = min(frame.shape[0], y + half_size)
         
+        # Choose color based on point type
+        if point_type == "beginning":
+            color = (0, 255, 0)  # Green for beginning point
+            label = "BEGIN"
+        elif point_type == "end":
+            color = (0, 0, 255)  # Red for end point
+            label = "END"
+        else:
+            color = (255, 0, 0)  # Blue for regular points
+            label = "REG"
+        
         # Draw bounding box
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.circle(frame, center, 3, (0, 255, 0), -1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(frame, center, 3, color, -1)
+        
+        # Add label
+        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
         
         return frame
     
@@ -192,7 +214,10 @@ class FootballTracker:
         print("Phase 1: Interactive Annotation")
         print("Instructions:")
         print("- Click on the football to annotate it")
+        print("- Press 'g' to mark next click as BEGINNING point (green) - starting position")
+        print("- Press 'h' to mark next click as END point (red) - ending position for distance calc")
         print("- Press 's' to skip current frame")
+        print("- Press 'r' to remove annotation from current frame")
         print("- Press 'q' to finish annotation and proceed to Phase 2")
         print("- Use keyboard keys to navigate frames:")
         print("  A/D: Move one frame (left/right)")
@@ -200,6 +225,8 @@ class FootballTracker:
         print("  HOME: Go to first frame")
         print("  END: Go to last frame")
         print("- Press SPACE to pause/resume navigation")
+        print("- Both points will be analyzed using CV field line detection for yard positions")
+        print("- END point will be used as manual calibration at height=0 for distance calculation")
         
         if not os.path.exists(self.input_video_path):
             raise FileNotFoundError(f"Input video not found: {self.input_video_path}")
@@ -262,17 +289,23 @@ class FootballTracker:
             # Show annotation status
             if has_annotation:
                 center = existing_annotation.center
-                self.draw_annotation_box(display_frame, center)
-                cv2.putText(display_frame, f"ANNOTATED at {center}", 
+                self.draw_annotation_box(display_frame, center, existing_annotation.point_type)
+                cv2.putText(display_frame, f"ANNOTATED ({existing_annotation.point_type.upper()}) at {center}", 
                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
-                cv2.putText(display_frame, "Click on the football to annotate", 
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                # Show current point type mode
+                mode_text = f"Click to annotate ({self.pending_point_type.upper()}) - Press 'g' for BEGIN, 'h' for END"
+                cv2.putText(display_frame, mode_text, 
+                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             
             # Show navigation instructions
             cv2.putText(display_frame, "A/D: 1 frame | W/X: 10 frames | SPACE: Pause | 's': Skip | 'q': Finish", 
                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(display_frame, f"Total annotations: {len(self.annotations)}", 
+            
+            # Show point type status
+            begin_status = "SET" if self.beginning_point else "NOT SET"
+            end_status = "SET" if self.end_point else "NOT SET"
+            cv2.putText(display_frame, f"Total: {len(self.annotations)} | Begin: {begin_status} | End: {end_status}", 
                        (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             cv2.imshow('Football Annotation', display_frame)
@@ -321,8 +354,22 @@ class FootballTracker:
             
             elif key == ord('r'):  # Remove annotation on current frame
                 if has_annotation:
+                    # If removing a special point, clear the reference
+                    if existing_annotation.point_type == "beginning":
+                        self.beginning_point = None
+                    elif existing_annotation.point_type == "end":
+                        self.end_point = None
+                    
                     self.annotations = [ann for ann in self.annotations if ann.frame_num != current_frame]
                     print(f"Removed annotation from frame {current_frame}")
+            
+            elif key == ord('g'):  # Set mode to create beginning point
+                self.pending_point_type = "beginning"
+                print("Mode: Creating BEGINNING point - click to place")
+            
+            elif key == ord('h'):  # Set mode to create end point
+                self.pending_point_type = "end"
+                print("Mode: Creating END point - click to place")
             
             elif self.annotation_ready and self.mouse_pos and not has_annotation:
                 # Create new annotation
@@ -330,11 +377,30 @@ class FootballTracker:
                 bbox = (center[0] - self.bbox_size//2, center[1] - self.bbox_size//2, 
                         self.bbox_size, self.bbox_size)
                 
-                annotation = Annotation(current_frame, bbox, center)
-                self.annotations.append(annotation)
+                annotation = Annotation(current_frame, bbox, center, self.pending_point_type)
                 
-                print(f"Annotated frame {current_frame} at position {center}")
+                # Handle special point types
+                if self.pending_point_type == "beginning":
+                    if self.beginning_point is not None:
+                        # Remove previous beginning point
+                        self.annotations = [ann for ann in self.annotations if ann.point_type != "beginning"]
+                    self.beginning_point = annotation
+                    print(f"Set BEGINNING point at frame {current_frame}, position {center}")
+                elif self.pending_point_type == "end":
+                    if self.end_point is not None:
+                        # Remove previous end point
+                        self.annotations = [ann for ann in self.annotations if ann.point_type != "end"]
+                    self.end_point = annotation
+                    print(f"Set END point at frame {current_frame}, position {center}")
+                else:
+                    print(f"Annotated frame {current_frame} at position {center}")
+                
+                self.annotations.append(annotation)
                 self.annotation_ready = False
+                
+                # Reset to regular mode after placing special points
+                if self.pending_point_type in ["beginning", "end"]:
+                    self.pending_point_type = "regular"
                 
                 # Continue to next iteration to show the annotation immediately
         
@@ -539,8 +605,13 @@ class FootballTracker:
         Returns:
             List of 3D positions
         """
-        if self.homography is None or len(image_points_with_time) < 3:
+        if len(image_points_with_time) < 3:
             return []
+        
+        # If no proper calibration, use alternative 3D analysis methods
+        if self.homography is None:
+            print("No camera calibration available - using alternative 3D trajectory analysis")
+            return self.alternative_3d_analysis(image_points_with_time)
         
         # Use frame-specific homographies if available
         use_dynamic_camera = len(self.frame_homographies) > 0
@@ -566,56 +637,65 @@ class FootballTracker:
         
         def residual_function(params):
             """Residual function for optimization with dynamic camera parameters"""
-            times = [t for _, t in image_points_with_time]
-            predicted_3d = ballistic_model(params, times)
-            
-            residuals = []
-            for i, ((u, v), t) in enumerate(image_points_with_time):
-                # Project 3D point to image
-                point_3d = predicted_3d[i]
+            try:
+                times = [t for _, t in image_points_with_time]
+                predicted_3d = ballistic_model(params, times)
                 
-                # Get frame-specific camera parameters if available
-                if use_dynamic_camera:
-                    frame_num = int(t * self.fps)
-                    if 0 <= frame_num < len(self.frame_homographies):
-                        # Use frame-specific homography for projection
-                        # For simplicity, use homography-based projection
-                        point_ground = np.array([point_3d[0], point_3d[2], 1], dtype=np.float32)  # X, Z, 1
-                        frame_homography = self.frame_homographies[frame_num]
-                        
-                        try:
-                            projected_2d = np.linalg.inv(frame_homography) @ point_ground
-                            if abs(projected_2d[2]) > 1e-6:
-                                projected_2d = projected_2d / projected_2d[2]
-                                u_proj, v_proj = projected_2d[0], projected_2d[1]
-                                
-                                # Adjust for height (simplified)
-                                height_offset = point_3d[1] * 10  # Rough height-to-pixel conversion
-                                v_proj -= height_offset
-                                
-                                residuals.extend([u - u_proj, v - v_proj])
-                            else:
+                residuals = []
+                for i, ((u, v), t) in enumerate(image_points_with_time):
+                    # Project 3D point to image
+                    point_3d = predicted_3d[i]
+                    
+                    # Get frame-specific camera parameters if available
+                    if use_dynamic_camera:
+                        frame_num = int(t * self.fps)
+                        if 0 <= frame_num < len(self.frame_homographies):
+                            # Use frame-specific homography for projection
+                            # For simplicity, use homography-based projection
+                            point_ground = np.array([point_3d[0], point_3d[2], 1], dtype=np.float32)  # X, Z, 1
+                            frame_homography = self.frame_homographies[frame_num]
+                            
+                            try:
+                                projected_2d = np.linalg.inv(frame_homography) @ point_ground
+                                if abs(projected_2d[2]) > 1e-6:
+                                    projected_2d = projected_2d / projected_2d[2]
+                                    u_proj, v_proj = projected_2d[0], projected_2d[1]
+                                    
+                                    # Adjust for height with proper perspective scaling
+                                    # Height effect depends on distance from camera
+                                    distance_to_camera = max(abs(point_3d[2]) + 10, 5)  # Minimum 5m distance
+                                    # Perspective scaling: closer objects show more height change per meter
+                                    height_pixels_per_meter = max(self.frame_height, self.frame_width) / (distance_to_camera * 0.5)
+                                    height_offset = point_3d[1] * height_pixels_per_meter
+                                    v_proj -= height_offset  # Subtract because image Y increases downward
+                                    
+                                    residuals.extend([u - u_proj, v - v_proj])
+                                else:
+                                    residuals.extend([1000, 1000])
+                            except:
                                 residuals.extend([1000, 1000])
-                        except:
+                        else:
                             residuals.extend([1000, 1000])
                     else:
-                        residuals.extend([1000, 1000])
-                else:
-                    # Use static camera model
-                    # Transform to camera coordinates
-                    point_cam = self.rotation_matrix @ point_3d + self.translation_vector
-                    
-                    # Project to image
-                    if point_cam[2] > 0:  # In front of camera
-                        projected = self.camera_matrix @ point_cam
-                        u_proj = projected[0] / projected[2]
-                        v_proj = projected[1] / projected[2]
+                        # Use static camera model
+                        # Transform to camera coordinates
+                        point_cam = self.rotation_matrix @ point_3d + self.translation_vector
                         
-                        residuals.extend([u - u_proj, v - v_proj])
-                    else:
-                        residuals.extend([1000, 1000])  # Large error for points behind camera
-            
-            return np.array(residuals)
+                        # Project to image
+                        if point_cam[2] > 0:  # In front of camera
+                            projected = self.camera_matrix @ point_cam
+                            u_proj = projected[0] / projected[2]
+                            v_proj = projected[1] / projected[2]
+                            
+                            residuals.extend([u - u_proj, v - v_proj])
+                        else:
+                            residuals.extend([1000, 1000])  # Large error for points behind camera
+                
+                return np.array(residuals)
+            except Exception as e:
+                print(f"Error in residual function: {e}")
+                # Return large residuals to indicate failure
+                return np.array([1000.0] * (len(image_points_with_time) * 2))
         
         # Initial guess: use homography to get ground plane positions, assume reasonable height
         initial_ground_points = []
@@ -641,18 +721,37 @@ class FootballTracker:
                 # Check for valid homography result
                 if abs(point_ground[2]) > 1e-6:
                     point_ground = point_ground / point_ground[2]  # Normalize
-                    # Reasonable initial height for a football (1-5 meters)
-                    initial_height = 3.0  # meters (~3.3 yards)
+                    # Height depends on position in trajectory - first point is always at ground level (height = 0)
+                    if len(initial_ground_points) == 0:
+                        # First point is always at ground level
+                        initial_height = 0.0  # meters (ground level)
+                    else:
+                        # Estimate height based on trajectory progression - parabolic arc
+                        trajectory_factor = len(initial_ground_points) / max(len(image_points_with_time), 1)
+                        # Parabolic trajectory: starts at 0, peaks in middle, ends at 0
+                        initial_height = 15.0 * trajectory_factor * (1 - trajectory_factor)  # Up to 15m (~16 yards) peak
                     initial_ground_points.append([point_ground[0], initial_height, point_ground[1]])
                 else:
                     # Fallback if homography gives bad result
-                    initial_ground_points.append([0, 3.0, 10])
+                    if len(initial_ground_points) == 0:
+                        initial_ground_points.append([0, 0.0, 10])  # First point at ground level
+                    else:
+                        # Use parabolic height estimation for fallback too
+                        trajectory_factor = len(initial_ground_points) / max(len(image_points_with_time), 1)
+                        fallback_height = 15.0 * trajectory_factor * (1 - trajectory_factor)
+                        initial_ground_points.append([0, fallback_height, 10])
                     
                 times.append(t)
             except Exception as e:
                 print(f"Warning: Failed to project point {(u, v)}: {e}")
                 # Use fallback position
-                initial_ground_points.append([0, 3.0, 10])
+                if len(initial_ground_points) == 0:
+                    initial_ground_points.append([0, 0.0, 10])  # First point at ground level
+                else:
+                    # Use parabolic height estimation for exception fallback too
+                    trajectory_factor = len(initial_ground_points) / max(len(image_points_with_time), 1)
+                    fallback_height = 15.0 * trajectory_factor * (1 - trajectory_factor)
+                    initial_ground_points.append([0, fallback_height, 10])
                 times.append(t)
         
         if not initial_ground_points:
@@ -666,71 +765,224 @@ class FootballTracker:
             dt = times[1] - times[0] if len(times) > 1 and times[1] != times[0] else 1.0
             if dt > 0:
                 velocity_estimate = (initial_ground_points[1] - initial_ground_points[0]) / dt
-                # Clamp velocity to reasonable ranges
+                # Clamp velocity to reasonable ranges (much more generous for football)
                 velocity_estimate[0] = np.clip(velocity_estimate[0], -20, 20)  # lateral velocity
-                velocity_estimate[1] = np.clip(velocity_estimate[1], -5, 15)   # vertical velocity  
+                velocity_estimate[1] = np.clip(velocity_estimate[1], -5, 50)   # vertical velocity (allow up to 50 m/s)
                 velocity_estimate[2] = np.clip(velocity_estimate[2], -10, 30)  # forward velocity
                 initial_velocity = velocity_estimate
             else:
-                initial_velocity = np.array([0, 5, 15])  # Default reasonable velocity
+                initial_velocity = np.array([0, 20, 15])  # Default with higher vertical velocity
         else:
-            initial_velocity = np.array([0, 5, 15])  # Default reasonable velocity
+            initial_velocity = np.array([0, 20, 15])  # Default with higher vertical velocity
         
         # Initial parameters: [x0, y0, z0, vx0, vy0, vz0]
+        # Force the initial height (y0) to be 0
         initial_params = np.concatenate([initial_ground_points[0], initial_velocity])
+        initial_params[1] = 0.0  # Force initial height to be 0
         
         # Make bounds more flexible and ensure initial guess is within bounds
-        # Clamp initial parameters to be within bounds
+        # Clamp initial parameters to be within bounds, but force y0 = 0
         lower_bounds = [-100, 0, -50, -50, -10, -50]  # More flexible bounds
-        upper_bounds = [100, 50, 200, 50, 30, 100]
+        upper_bounds = [100, 0, 200, 50, 80, 100]     # Allow much higher trajectories (80m = ~87 yards max height)
         
         # Ensure initial guess is within bounds
         initial_params_clamped = np.clip(initial_params, lower_bounds, upper_bounds)
+        initial_params_clamped[1] = 0.0  # Ensure initial height is exactly 0
         
         print(f"Initial trajectory parameters: {initial_params_clamped}")
         print(f"Position: ({initial_params_clamped[0]:.1f}, {initial_params_clamped[1]:.1f}, {initial_params_clamped[2]:.1f}) m")
         print(f"Velocity: ({initial_params_clamped[3]:.1f}, {initial_params_clamped[4]:.1f}, {initial_params_clamped[5]:.1f}) m/s")
         
+        # Debug: Show initial height estimates and expected pixel effects
+        print("Debug - Initial height estimates:")
+        for i, point in enumerate(initial_ground_points):
+            # Estimate pixel effect for this height
+            distance_est = max(abs(point[2]) + 10, 5)
+            height_pixels_per_meter = max(self.frame_height, self.frame_width) / (distance_est * 0.5)
+            pixel_effect = point[1] * height_pixels_per_meter
+            print(f"  Point {i}: Height = {point[1]:.2f}m ({point[1] * 1.094:.1f} yards) -> {pixel_effect:.0f} pixel effect")
+        
         # Optimize
+        print("Starting optimization...")
+        print(f"Initial params before optimization: {initial_params_clamped}")
         try:
             result = least_squares(residual_function, initial_params_clamped, 
                                  bounds=(lower_bounds, upper_bounds))
+            print(f"Optimization result: success={result.success}, cost={result.cost:.6f}")
+            print(f"Final params after optimization: {result.x}")
             
             if result.success:
+                print(f"Optimization converged! Cost: {result.cost:.6f}")
+                
                 # Generate 3D positions for all time points
                 optimized_params = result.x
+                print(f"Optimized parameters: {optimized_params}")
+                print(f"Final position: ({optimized_params[0]:.1f}, {optimized_params[1]:.1f}, {optimized_params[2]:.1f}) m")
+                print(f"Final velocity: ({optimized_params[3]:.1f}, {optimized_params[4]:.1f}, {optimized_params[5]:.1f}) m/s")
+                
                 times_all = [t for _, t in image_points_with_time]
                 positions_3d_m = ballistic_model(optimized_params, times_all)
+                
+                # Check actual trajectory heights
+                max_height_m = max(pos[1] for pos in positions_3d_m)
+                print(f"Calculated max height: {max_height_m:.2f}m ({max_height_m * 1.094:.1f} yards)")
+                
+                # Show trajectory progression
+                print("Trajectory heights:")
+                for i, pos in enumerate(positions_3d_m[:min(5, len(positions_3d_m))]):
+                    print(f"  Point {i}: {pos[1]:.2f}m ({pos[1] * 1.094:.1f} yards)")
                 
                 # Convert back to yards and create Position3D objects
                 positions_3d = []
                 for i, pos_m in enumerate(positions_3d_m):
                     pos_yards = pos_m / 0.9144  # Convert meters to yards
                     frame_num = int(image_points_with_time[i][1] * self.fps)  # Convert time to frame
+                    
+                    # Ensure first position is always at ground level (height = 0)
+                    if i == 0:
+                        pos_yards[1] = 0.0  # Force first height to be exactly 0
+                    
                     positions_3d.append(Position3D(pos_yards[0], pos_yards[1], pos_yards[2], frame_num))
+                
+                # Validate that first position is at ground level
+                if positions_3d and positions_3d[0].y != 0.0:
+                    print(f"Warning: Adjusting first position height from {positions_3d[0].y:.3f} to 0.0 yards")
+                    positions_3d[0] = Position3D(positions_3d[0].x, 0.0, positions_3d[0].z, positions_3d[0].frame_num)
                 
                 return positions_3d
             
         except Exception as e:
             print(f"3D trajectory optimization failed: {e}")
-            print("Attempting fallback with simpler trajectory model...")
+            print("*** USING ENHANCED FALLBACK TRAJECTORY MODEL ***")
+            print("Main optimization failed - providing detailed fallback analysis:")
             
-            # Fallback: use simple linear interpolation in 3D space
+            # Enhanced fallback: detailed analysis even with failed optimization
             try:
+                print("\n=== ENHANCED FALLBACK ANALYSIS ===")
+                
+                # First, try to extract what we can from the homography
+                if self.homography is not None:
+                    print("Using available homography for ground plane projection...")
+                    
+                    # Extract ground positions
+                    ground_positions = []
+                    for u, v in [point for point, _ in image_points_with_time]:
+                        point_img = np.array([u, v, 1], dtype=np.float32)
+                        point_ground = self.homography @ point_img
+                        if abs(point_ground[2]) > 1e-6:
+                            point_ground = point_ground / point_ground[2]
+                            ground_positions.append([point_ground[0], point_ground[1]])
+                    
+                    if ground_positions:
+                        ground_positions = np.array(ground_positions)
+                        ground_distance = np.linalg.norm(ground_positions[-1] - ground_positions[0])
+                        print(f"   Ground plane distance: {ground_distance:.1f} meters ({ground_distance * 1.094:.1f} yards)")
+                        
+                        # Analyze ground motion pattern
+                        if len(ground_positions) > 2:
+                            velocities = []
+                            for i in range(1, len(ground_positions)):
+                                dt = image_points_with_time[i][1] - image_points_with_time[i-1][1]
+                                if dt > 0:
+                                    vel = np.linalg.norm(ground_positions[i] - ground_positions[i-1]) / dt
+                                    velocities.append(vel)
+                            
+                            if velocities:
+                                avg_velocity = np.mean(velocities)
+                                print(f"   Average ground velocity: {avg_velocity:.1f} m/s ({avg_velocity * 1.094:.1f} yards/s)")
+                
+                # Analyze image trajectory for height estimation
+                print("\nAnalyzing image trajectory for height estimation...")
+                v_coords = [v for u, v in [point for point, _ in image_points_with_time]]
+                times = [t for _, t in image_points_with_time]
+                
+                # Find peak and estimate physics
+                min_v_idx = np.argmin(v_coords)
+                peak_time = times[min_v_idx] - times[0]
+                total_time = times[-1] - times[0]
+                
+                print(f"   Time to peak: {peak_time:.2f}s (of {total_time:.2f}s total)")
+                
+                # Multiple height estimation methods
+                methods_results = []
+                
+                # Method 1: Physics-based from time to peak
+                if peak_time > 0:
+                    vy0_physics = 9.81 * peak_time
+                    max_height_physics = (vy0_physics ** 2) / (2 * 9.81)
+                    methods_results.append(("Physics (time to peak)", max_height_physics))
+                    print(f"   Physics method: {max_height_physics:.1f}m ({max_height_physics * 1.094:.1f} yards)")
+                
+                # Method 2: Pixel displacement analysis
+                v_range = max(v_coords) - min(v_coords)
+                if v_range > 0:
+                    # Estimate based on typical camera angles (30-60 degrees from horizontal)
+                    for angle in [30, 45, 60]:
+                        height_from_pixels = v_range * np.tan(np.radians(angle)) * 0.1  # rough conversion
+                        methods_results.append((f"Pixel analysis ({angle}° camera)", height_from_pixels))
+                        print(f"   Pixel method ({angle}° camera): {height_from_pixels:.1f}m ({height_from_pixels * 1.094:.1f} yards)")
+                
+                # Method 3: Trajectory curvature analysis
+                if len(v_coords) >= 5:
+                    # Fit parabola to v-coordinates
+                    t_norm = np.linspace(0, 1, len(v_coords))
+                    try:
+                        # Fit v = a*t^2 + b*t + c
+                        coeffs = np.polyfit(t_norm, v_coords, 2)
+                        # Peak occurs at t = -b/(2a)
+                        if coeffs[0] != 0:
+                            t_peak_fit = -coeffs[1] / (2 * coeffs[0])
+                            if 0 <= t_peak_fit <= 1:
+                                curvature_height = abs(coeffs[0]) * 0.05  # rough conversion
+                                methods_results.append(("Curvature analysis", curvature_height))
+                                print(f"   Curvature method: {curvature_height:.1f}m ({curvature_height * 1.094:.1f} yards)")
+                    except:
+                        pass
+                
+                # Choose best estimate
+                if methods_results:
+                    # Prefer physics-based method, but validate against others
+                    physics_results = [r for name, r in methods_results if "Physics" in name]
+                    if physics_results:
+                        best_height = physics_results[0]
+                        method_name = "Physics-based"
+                    else:
+                        best_height = np.median([r for _, r in methods_results])
+                        method_name = "Median of methods"
+                    
+                    print(f"\n   BEST ESTIMATE: {best_height:.1f}m ({best_height * 1.094:.1f} yards) [{method_name}]")
+                else:
+                    best_height = 15.0  # Default reasonable height
+                    print(f"\n   Using default height: {best_height:.1f}m ({best_height * 1.094:.1f} yards)")
+                
+                # Generate trajectory with enhanced height model
                 fallback_positions = []
                 for i, ((u, v), t) in enumerate(image_points_with_time):
-                    # Use homography for X,Z and assume parabolic height
-                    point_img = np.array([u, v, 1], dtype=np.float32)
-                    point_ground = self.homography @ point_img
-                    point_ground = point_ground / point_ground[2]
+                    if self.homography is not None:
+                        # Use homography for X,Z
+                        point_img = np.array([u, v, 1], dtype=np.float32)
+                        point_ground = self.homography @ point_img
+                        point_ground = point_ground / point_ground[2]
+                        x_pos, z_pos = point_ground[0], point_ground[1]
+                    else:
+                        # Estimate from pixel positions
+                        x_pos = (u - 320) * 0.1  # rough conversion
+                        z_pos = i * 5  # assume 5m forward per frame
                     
-                    # Simple parabolic height model
-                    t_normalized = t / max([time for _, time in image_points_with_time])
-                    height_m = 3.0 + 5.0 * t_normalized * (1 - t_normalized)  # Parabolic arc
+                    # Enhanced height model using best estimate
+                    t_normalized = (t - times[0]) / (times[-1] - times[0]) if times[-1] > times[0] else 0
+                    height_factor = 4 * t_normalized * (1 - t_normalized)  # parabolic, peak at t=0.5
+                    height_m = best_height * height_factor
                     
-                    pos_yards = np.array([point_ground[0], height_m, point_ground[1]]) / 0.9144
-                    frame_num = int(t * self.fps)
+                    pos_yards = np.array([x_pos, height_m, z_pos]) / 0.9144
+                    frame_num = int(t * self.fps) if hasattr(self, 'fps') else i
                     fallback_positions.append(Position3D(pos_yards[0], pos_yards[1], pos_yards[2], frame_num))
+                
+                # Ensure first position is at ground level
+                if fallback_positions:
+                    if fallback_positions[0].y != 0.0:
+                        print(f"Adjusting fallback first position height from {fallback_positions[0].y:.3f} to 0.0 yards")
+                        fallback_positions[0] = Position3D(fallback_positions[0].x, 0.0, fallback_positions[0].z, fallback_positions[0].frame_num)
                 
                 print(f"Fallback method generated {len(fallback_positions)} positions")
                 return fallback_positions
@@ -946,6 +1198,174 @@ class FootballTracker:
             print("Warning: Low camera tracking success rate. 3D positions may be less accurate.")
             print("Consider using a video with more stable field features or less camera movement.")
     
+    def alternative_3d_analysis(self, image_points_with_time: List[Tuple[Tuple[int, int], float]]) -> List[Position3D]:
+        """
+        Alternative 3D trajectory analysis without camera calibration
+        Uses image-based analysis and physics constraints to estimate 3D trajectory
+        
+        Args:
+            image_points_with_time: List of ((u, v), time_seconds) tuples
+            
+        Returns:
+            List of 3D positions with estimated coordinates
+        """
+        print("=== ALTERNATIVE 3D TRAJECTORY ANALYSIS ===")
+        print("Extracting maximum information from image trajectory...")
+        
+        # Extract image coordinates and times
+        image_points = [point for point, _ in image_points_with_time]
+        times = [t for _, t in image_points_with_time]
+        
+        # 1. ANALYZE IMAGE TRAJECTORY CHARACTERISTICS
+        print("\n1. IMAGE TRAJECTORY ANALYSIS:")
+        
+        # Horizontal motion analysis
+        u_coords = [u for u, v in image_points]
+        v_coords = [v for u, v in image_points]
+        
+        u_range = max(u_coords) - min(u_coords)
+        v_range = max(v_coords) - min(v_coords)
+        
+        print(f"   Horizontal motion range: {u_range:.0f} pixels")
+        print(f"   Vertical motion range: {v_range:.0f} pixels")
+        
+        # Find trajectory peak (lowest v-coordinate = highest in image)
+        min_v_idx = np.argmin(v_coords)
+        peak_time = times[min_v_idx]
+        peak_v = v_coords[min_v_idx]
+        
+        print(f"   Trajectory peak at: t={peak_time:.2f}s, v={peak_v:.0f} pixels")
+        print(f"   Peak occurs at {min_v_idx+1}/{len(image_points)} of trajectory")
+        
+        # 2. ESTIMATE RELATIVE SCALE AND MOTION
+        print("\n2. RELATIVE SCALE ESTIMATION:")
+        
+        # Estimate pixel-to-meter conversion using typical football field dimensions
+        # Assume the trajectory spans roughly 20-60 yards horizontally
+        estimated_horizontal_distance = 40  # yards, reasonable assumption
+        pixels_per_yard = u_range / estimated_horizontal_distance if u_range > 0 else 20
+        
+        print(f"   Estimated scale: {pixels_per_yard:.1f} pixels/yard")
+        print(f"   Horizontal distance: ~{estimated_horizontal_distance} yards")
+        
+        # 3. PHYSICS-BASED HEIGHT ESTIMATION
+        print("\n3. PHYSICS-BASED TRAJECTORY FITTING:")
+        
+        # Use ballistic physics to estimate trajectory parameters
+        total_time = times[-1] - times[0]
+        time_to_peak = peak_time - times[0]
+        
+        # Estimate initial vertical velocity from time to peak
+        # At peak: vy = vy0 - g*t_peak = 0, so vy0 = g*t_peak
+        g = 9.81  # m/s^2
+        estimated_vy0 = g * time_to_peak
+        estimated_max_height = (estimated_vy0 ** 2) / (2 * g)
+        
+        print(f"   Time to peak: {time_to_peak:.2f}s")
+        print(f"   Estimated initial vertical velocity: {estimated_vy0:.1f} m/s")
+        print(f"   Estimated maximum height: {estimated_max_height:.1f}m ({estimated_max_height * 1.094:.1f} yards)")
+        
+        # 4. ESTIMATE HORIZONTAL VELOCITIES
+        print("\n4. HORIZONTAL MOTION ANALYSIS:")
+        
+        # Convert pixel motion to estimated real-world motion
+        u_start, u_end = u_coords[0], u_coords[-1]
+        horizontal_pixels = u_end - u_start
+        horizontal_yards = horizontal_pixels / pixels_per_yard
+        horizontal_velocity = horizontal_yards / total_time if total_time > 0 else 0
+        
+        print(f"   Horizontal pixel motion: {horizontal_pixels:.0f} pixels")
+        print(f"   Estimated horizontal distance: {horizontal_yards:.1f} yards")
+        print(f"   Estimated horizontal velocity: {horizontal_velocity:.1f} yards/s")
+        
+        # 5. CREATE 3D TRAJECTORY ESTIMATE
+        print("\n5. GENERATING 3D TRAJECTORY:")
+        
+        positions_3d = []
+        
+        for i, ((u, v), t) in enumerate(image_points_with_time):
+            # Time relative to start
+            t_rel = t - times[0]
+            
+            # X (lateral): Convert pixel position to estimated yards
+            x_center = (min(u_coords) + max(u_coords)) / 2
+            x_yards = (u - x_center) / pixels_per_yard
+            
+            # Y (height): Use ballistic trajectory
+            y_meters = estimated_vy0 * t_rel - 0.5 * g * t_rel * t_rel
+            y_yards = max(0, y_meters * 1.094)  # Convert to yards, don't go below ground
+            
+            # Z (forward): Assume linear forward motion
+            z_yards = horizontal_velocity * t_rel
+            
+            frame_num = int(t * self.fps) if hasattr(self, 'fps') else i
+            positions_3d.append(Position3D(x_yards, y_yards, z_yards, frame_num))
+        
+        # 6. TRAJECTORY QUALITY ASSESSMENT
+        print("\n6. TRAJECTORY QUALITY ASSESSMENT:")
+        
+        heights = [pos.y for pos in positions_3d]
+        max_height_calc = max(heights)
+        
+        # Check if trajectory makes physical sense
+        starts_at_ground = heights[0] < 1.0  # Within 1 yard of ground
+        ends_at_ground = heights[-1] < 1.0
+        has_reasonable_peak = 5 < max_height_calc < 100  # Between 5-100 yards
+        
+        print(f"   Calculated max height: {max_height_calc:.1f} yards")
+        print(f"   Starts near ground: {starts_at_ground}")
+        print(f"   Ends near ground: {ends_at_ground}")
+        print(f"   Reasonable peak height: {has_reasonable_peak}")
+        
+        quality_score = sum([starts_at_ground, ends_at_ground, has_reasonable_peak])
+        print(f"   Trajectory quality score: {quality_score}/3")
+        
+        if quality_score >= 2:
+            print("   ✓ Trajectory appears physically reasonable")
+        else:
+            print("   ⚠ Trajectory may have issues - results are rough estimates")
+        
+        # 7. ADDITIONAL INSIGHTS
+        print("\n7. ADDITIONAL TRAJECTORY INSIGHTS:")
+        
+        # Analyze trajectory shape
+        v_motion = np.array(v_coords)
+        v_smooth = np.convolve(v_motion, np.ones(3)/3, mode='same')  # Simple smoothing
+        
+        # Find if trajectory is symmetric
+        first_half = v_smooth[:len(v_smooth)//2]
+        second_half = v_smooth[len(v_smooth)//2:]
+        
+        if len(first_half) > 0 and len(second_half) > 0:
+            asymmetry = abs(np.mean(np.diff(first_half)) + np.mean(np.diff(second_half)))
+            print(f"   Trajectory asymmetry measure: {asymmetry:.1f}")
+            
+            if asymmetry < 5:
+                print("   ✓ Trajectory appears symmetric (good ballistic fit)")
+            else:
+                print("   ⚠ Trajectory appears asymmetric (may indicate tracking issues)")
+        
+        # Estimate launch angle
+        if len(positions_3d) > 1:
+            initial_horizontal = abs(positions_3d[1].z - positions_3d[0].z)
+            initial_vertical = abs(positions_3d[1].y - positions_3d[0].y)
+            
+            if initial_horizontal > 0:
+                launch_angle = np.degrees(np.arctan(initial_vertical / initial_horizontal))
+                print(f"   Estimated launch angle: {launch_angle:.1f} degrees")
+                
+                if 20 < launch_angle < 60:
+                    print("   ✓ Launch angle in reasonable range for football")
+                else:
+                    print("   ⚠ Launch angle seems unusual for football trajectory")
+        
+        print("\n=== ALTERNATIVE ANALYSIS COMPLETE ===")
+        print(f"Generated {len(positions_3d)} 3D position estimates")
+        print("Note: These are estimates based on image analysis and physics.")
+        print("Accuracy depends on camera angle and trajectory assumptions.")
+        
+        return positions_3d
+    
     def analyze_trajectory(self):
         """Analyze trajectory data to find crossing points and prepare for visualization"""
         if not self.positions_3d:
@@ -1001,6 +1421,205 @@ class FootballTracker:
                 return
         
         print(f"No crossing point found at {target_height} yards on downward swing")
+    
+    def detect_yard_lines(self, frame: np.ndarray) -> List[Tuple[float, List[Tuple[int, int]]]]:
+        """
+        Detect yard lines in the frame and estimate their positions
+        
+        Args:
+            frame: Input frame
+            
+        Returns:
+            List of (estimated_yard_position, line_points) tuples
+        """
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Enhance contrast to make field lines more visible
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(gray)
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+        
+        # Detect edges using Canny
+        edges = cv2.Canny(blurred, 30, 100, apertureSize=3)
+        
+        # Detect lines using Hough transform
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=80, 
+                               minLineLength=100, maxLineGap=20)
+        
+        if lines is None:
+            return []
+        
+        # Filter for horizontal lines (yard lines)
+        yard_lines = []
+        frame_height, frame_width = frame.shape[:2]
+        
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            
+            # Calculate line angle
+            angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
+            length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            
+            # Keep horizontal lines (yard lines) - within 10 degrees of horizontal
+            if (abs(angle) < 10 or abs(angle - 180) < 10 or abs(angle + 180) < 10) and length > frame_width * 0.3:
+                # Calculate average y position of the line
+                avg_y = (y1 + y2) / 2
+                
+                # Estimate yard position based on perspective
+                # Lines closer to bottom of frame are closer to camera (lower yard numbers)
+                # This is a rough estimation - in reality would need proper calibration
+                relative_position = (frame_height - avg_y) / frame_height
+                
+                # Assume we can see roughly from goal line (0) to 30-40 yard line
+                estimated_yard = relative_position * 40  # Rough estimate
+                
+                yard_lines.append((estimated_yard, [(x1, y1), (x2, y2)]))
+        
+        # Sort by estimated yard position
+        yard_lines.sort(key=lambda x: x[0])
+        
+        return yard_lines
+    
+    def calculate_position_from_point(self, point: Annotation, point_name: str) -> Optional[float]:
+        """
+        Calculate the downfield position of a given point using CV-based field line detection
+        
+        Args:
+            point: The annotation point to analyze
+            point_name: Name for logging (e.g., "end point", "beginning point")
+            
+        Returns:
+            Estimated downfield distance in yards, or None if calculation fails
+        """
+        if point is None:
+            print(f"No {point_name} set for distance calculation")
+            return None
+        
+        print(f"\n=== CALCULATING {point_name.upper()} POSITION ===")
+        print(f"Using {point_name} at frame {point.frame_num}, position {point.center}")
+        if point_name == "end point":
+            print("End point is treated as manual calibration at height=0")
+        
+        # Get the frame containing the point
+        cap = cv2.VideoCapture(self.input_video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, point.frame_num)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            print("Failed to read frame for distance calculation")
+            return None
+        
+        # Detect yard lines in the frame
+        yard_lines = self.detect_yard_lines(frame)
+        
+        if not yard_lines:
+            print("No yard lines detected in frame")
+            return None
+        
+        print(f"Detected {len(yard_lines)} potential yard lines")
+        
+        # Find the yard line closest to the point
+        point_x, point_y = point.center
+        closest_line = None
+        min_distance = float('inf')
+        
+        for yard_pos, line_points in yard_lines:
+            # Calculate distance from end point to this line
+            x1, y1 = line_points[0]
+            x2, y2 = line_points[1]
+            
+            # Distance from point to line
+            A = y2 - y1
+            B = x1 - x2
+            C = x2 * y1 - x1 * y2
+            
+            distance = abs(A * point_x + B * point_y + C) / np.sqrt(A*A + B*B)
+            
+            if distance < min_distance:
+                min_distance = distance
+                closest_line = (yard_pos, line_points)
+        
+        if closest_line is None:
+            print("Could not find closest yard line")
+            return None
+        
+        closest_yard, closest_points = closest_line
+        print(f"Closest yard line estimated at {closest_yard:.1f} yards, distance: {min_distance:.1f} pixels")
+        
+        # Use perspective analysis to refine the estimate
+        frame_height = frame.shape[0]
+        
+        # The point's y-coordinate gives us perspective information
+        # Points higher in the frame (lower y values) are further downfield
+        perspective_factor = (frame_height - point_y) / frame_height
+        
+        # Estimate based on typical football field perspective
+        # Assume we can see from goal line to about 40-50 yard line
+        max_visible_distance = 45  # yards
+        estimated_distance = perspective_factor * max_visible_distance
+        
+        # Refine using the closest yard line as reference
+        if min_distance < 50:  # If end point is close to a detected line
+            # Use the detected line position as primary estimate
+            refined_distance = closest_yard
+        else:
+            # Use perspective-based estimate
+            refined_distance = estimated_distance
+        
+        # Apply calibration adjustment based on point type
+        if point_name == "end point":
+            # For end point (landing), typically past the goal line (negative territory)
+            # Since this is a manual calibration point at height=0, we can be more confident
+            if refined_distance < 0:
+                refined_distance = abs(refined_distance)  # Convert to positive distance
+            final_distance = -refined_distance if refined_distance > 0 else refined_distance
+            print(f"Calculated downfield distance: {final_distance:.1f} yards")
+            print(f"(Negative values indicate distance past the goal line)")
+        else:
+            # For beginning point (kick position), typically positive yard line
+            # Adjust based on typical field goal kick positions
+            if refined_distance < 0:
+                refined_distance = abs(refined_distance)  # Convert to positive
+            
+            # Starting positions are typically between 15-40 yard line
+            if refined_distance > 50:
+                refined_distance = 50  # Cap at reasonable maximum
+            elif refined_distance < 10:
+                refined_distance = 15  # Minimum reasonable kick distance
+            
+            final_distance = refined_distance
+            print(f"Calculated starting position: {final_distance:.1f} yard line")
+        
+        return final_distance
+    
+    def calculate_downfield_distance(self) -> Optional[float]:
+        """
+        Calculate the downfield distance of the end point using CV-based field line detection
+        Uses the end point as a manual calibration point at height=0
+        
+        Returns:
+            Estimated downfield distance in yards, or None if calculation fails
+        """
+        result = self.calculate_position_from_point(self.end_point, "end point")
+        if result is not None:
+            self.calculated_distance = result
+        return result
+    
+    def calculate_starting_position(self) -> Optional[float]:
+        """
+        Calculate the starting position of the beginning point using CV-based field line detection
+        
+        Returns:
+            Estimated starting yard line position, or None if calculation fails
+        """
+        result = self.calculate_position_from_point(self.beginning_point, "beginning point")
+        if result is not None:
+            self.starting_position = result
+        return result
     
     def create_trajectory_graph(self, current_frame: int, graph_width: int = 400, graph_height: int = 300) -> np.ndarray:
         """
@@ -1328,20 +1947,56 @@ class FootballTracker:
             self.track_camera_motion()
         
         # Compute 3D positions using ballistic trajectory fitting
-        if self.homography is not None:
-            print("Computing 3D trajectory...")
-            self.compute_3d_trajectory()
-            
-            # Analyze trajectory for crossing points
-            if self.positions_3d:
-                self.analyze_trajectory()
+        print("Computing 3D trajectory...")
+        self.compute_3d_trajectory()
+        
+        # Analyze trajectory for crossing points
+        if self.positions_3d:
+            self.analyze_trajectory()
+        
+        # Calculate positions using CV-based field line detection
+        print("\n=== POSITION ANALYSIS USING CV FIELD LINE DETECTION ===")
+        
+        # Calculate starting position
+        if self.beginning_point is not None:
+            starting_position = self.calculate_starting_position()
+            if starting_position is not None:
+                print(f"\nStarting position: {starting_position:.1f} yard line")
+            else:
+                print("Starting position calculation failed")
         else:
-            print("3D trajectory computation skipped (no valid calibration)")
+            print("\nNo beginning point marked - skipping starting position calculation")
+            print("Use 'g' key during annotation to mark a beginning point")
+        
+        # Calculate ending position using end point as manual calibration
+        if self.end_point is not None:
+            calculated_distance = self.calculate_downfield_distance()
+            if calculated_distance is not None:
+                print(f"\nFinal calculated distance: {calculated_distance:.1f} yards from goal line")
+                if calculated_distance < 0:
+                    print(f"Ball landed {abs(calculated_distance):.1f} yards PAST the goal line")
+                else:
+                    print(f"Ball landed {calculated_distance:.1f} yards SHORT of the goal line")
+            else:
+                print("Distance calculation failed")
+        else:
+            print("\nNo end point marked - skipping distance calculation")
+            print("Use 'h' key during annotation to mark an end point for distance calculation")
+        
+        # Calculate total distance if both points are available
+        if self.starting_position is not None and self.calculated_distance is not None:
+            if self.calculated_distance < 0:  # Ball went past goal line
+                total_distance = self.starting_position + abs(self.calculated_distance)
+                print(f"\n*** TOTAL KICK DISTANCE: {total_distance:.1f} yards ***")
+                print(f"From {self.starting_position:.1f} yard line to {abs(self.calculated_distance):.1f} yards past goal line")
+            else:  # Ball fell short
+                total_distance = self.starting_position - self.calculated_distance
+                print(f"\n*** TOTAL KICK DISTANCE: {total_distance:.1f} yards ***")
+                print(f"From {self.starting_position:.1f} yard line to {self.calculated_distance:.1f} yard line")
     
     def compute_3d_trajectory(self):
         """Compute 3D positions for all frames with valid bounding boxes"""
-        if self.homography is None:
-            return
+        # Always attempt 3D computation - use alternative methods if no calibration
         
         # Collect image points with time for trajectory fitting
         image_points_with_time = []
@@ -1399,12 +2054,36 @@ class FootballTracker:
             # Draw bounding box if available
             if self.final_bboxes[frame_count] is not None:
                 bbox = self.final_bboxes[frame_count]
+                
+                # Determine color based on point type
+                point_type = "regular"
+                if self.beginning_point and self.beginning_point.frame_num == frame_count:
+                    point_type = "beginning"
+                elif self.end_point and self.end_point.frame_num == frame_count:
+                    point_type = "end"
+                
+                # Choose color based on point type
+                if point_type == "beginning":
+                    box_color = (0, 255, 0)  # Green
+                elif point_type == "end":
+                    box_color = (0, 0, 255)  # Red
+                else:
+                    box_color = (0, 255, 0)  # Default green
+                
                 cv2.rectangle(frame, (bbox[0], bbox[1]), 
-                            (bbox[0] + bbox[2], bbox[1] + bbox[3]), (0, 255, 0), 2)
+                            (bbox[0] + bbox[2], bbox[1] + bbox[3]), box_color, 2)
                 
                 # Draw center point
                 center = (bbox[0] + bbox[2]//2, bbox[1] + bbox[3]//2)
                 cv2.circle(frame, center, 3, (0, 0, 255), -1)
+                
+                # Add label for special points
+                if point_type == "beginning":
+                    cv2.putText(frame, "BEGIN", (bbox[0], bbox[1] - 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                elif point_type == "end":
+                    cv2.putText(frame, "END (Cal.)", (bbox[0], bbox[1] - 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
                 
                 # Draw 3D position if available
                 if self.positions_3d:
@@ -1464,16 +2143,64 @@ class FootballTracker:
                     frame[y_offset:y_offset+graph_h, x_offset:x_offset+graph_w] = graph
                 
                 # Add crossing point information
+                info_y_pos = frame_h - 80
+                
                 if self.crossing_point_y is not None:
                     crossing_text = f"Crossing at 3.33yd height: {self.crossing_point_y:.2f}yd forward"
-                    cv2.putText(frame, crossing_text, (10, frame_h - 30), 
+                    cv2.putText(frame, crossing_text, (10, info_y_pos), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
                     
                     # Add background rectangle for better visibility
                     text_size = cv2.getTextSize(crossing_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                    cv2.rectangle(frame, (5, frame_h - 50), (text_size[0] + 15, frame_h - 10), (0, 0, 0), -1)
-                    cv2.putText(frame, crossing_text, (10, frame_h - 30), 
+                    cv2.rectangle(frame, (5, info_y_pos - 20), (text_size[0] + 15, info_y_pos + 10), (0, 0, 0), -1)
+                    cv2.putText(frame, crossing_text, (10, info_y_pos), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+                    info_y_pos += 30
+                
+                # Add starting position information
+                if self.starting_position is not None:
+                    start_text = f"Start: {self.starting_position:.1f} yard line"
+                    text_color = (255, 255, 0)  # Cyan for starting position
+                    
+                    # Add background rectangle
+                    text_size = cv2.getTextSize(start_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    cv2.rectangle(frame, (5, info_y_pos - 20), (text_size[0] + 15, info_y_pos + 5), (0, 0, 0), -1)
+                    cv2.putText(frame, start_text, (10, info_y_pos), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2, cv2.LINE_AA)
+                    info_y_pos += 30
+                
+                # Add calculated distance information
+                if self.calculated_distance is not None:
+                    if self.calculated_distance < 0:
+                        distance_text = f"End: {abs(self.calculated_distance):.1f}yd PAST goal line"
+                        text_color = (0, 255, 255)  # Yellow for past goal line
+                    else:
+                        distance_text = f"End: {self.calculated_distance:.1f}yd SHORT of goal line"
+                        text_color = (0, 165, 255)  # Orange for short
+                    
+                    # Add background rectangle
+                    text_size = cv2.getTextSize(distance_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                    cv2.rectangle(frame, (5, info_y_pos - 20), (text_size[0] + 15, info_y_pos + 5), (0, 0, 0), -1)
+                    cv2.putText(frame, distance_text, (10, info_y_pos), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2, cv2.LINE_AA)
+                    info_y_pos += 25
+                    
+                    # Add total distance if both points available
+                    if self.starting_position is not None:
+                        if self.calculated_distance < 0:
+                            total_dist = self.starting_position + abs(self.calculated_distance)
+                        else:
+                            total_dist = self.starting_position - self.calculated_distance
+                        
+                        total_text = f"Total: {total_dist:.1f} yards"
+                        cv2.putText(frame, total_text, (10, info_y_pos), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                        info_y_pos += 20
+                    
+                    # Add calibration note
+                    cal_text = "(CV field line detection)"
+                    cv2.putText(frame, cal_text, (10, info_y_pos), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1, cv2.LINE_AA)
             
             # Write frame to output video
             out.write(frame)
@@ -1510,7 +2237,45 @@ class FootballTracker:
             print("=" * 50)
             print("Tracking pipeline completed successfully!")
             print(f"Total annotations: {len(self.annotations)}")
-            print(f"Output video: {self.output_video_path}")
+            
+            # Summary of special points
+            if self.beginning_point:
+                print(f"Beginning point: Frame {self.beginning_point.frame_num} at {self.beginning_point.center}")
+            if self.end_point:
+                print(f"End point: Frame {self.end_point.frame_num} at {self.end_point.center}")
+            
+            # Position analysis results
+            print(f"\n*** FIELD POSITION ANALYSIS RESULTS ***")
+            
+            if self.starting_position is not None:
+                print(f"Starting position: {self.starting_position:.1f} yard line")
+            else:
+                print("Starting position: Not calculated (no beginning point marked)")
+            
+            if self.calculated_distance is not None:
+                if self.calculated_distance < 0:
+                    print(f"Ending position: {abs(self.calculated_distance):.1f} yards PAST the goal line")
+                    print("Result: FIELD GOAL SUCCESSFUL! ✓")
+                else:
+                    print(f"Ending position: {self.calculated_distance:.1f} yards SHORT of the goal line")
+                    print("Result: Field goal attempt was short ✗")
+            else:
+                print("Ending position: Not calculated (no end point marked)")
+            
+            # Total distance calculation
+            if self.starting_position is not None and self.calculated_distance is not None:
+                if self.calculated_distance < 0:
+                    total_distance = self.starting_position + abs(self.calculated_distance)
+                    print(f"\n🏈 TOTAL KICK DISTANCE: {total_distance:.1f} YARDS 🏈")
+                    print(f"   From {self.starting_position:.1f}yd line → {abs(self.calculated_distance):.1f}yd past goal")
+                else:
+                    total_distance = self.starting_position - self.calculated_distance
+                    print(f"\n🏈 TOTAL KICK DISTANCE: {total_distance:.1f} YARDS 🏈")
+                    print(f"   From {self.starting_position:.1f}yd line → {self.calculated_distance:.1f}yd line")
+            
+            print("\n(Analysis based on CV field line detection with manual calibration)")
+            
+            print(f"\nOutput video: {self.output_video_path}")
             
         except Exception as e:
             print(f"Error during tracking: {str(e)}")

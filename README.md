@@ -70,6 +70,7 @@ python football_tracker.py --input your_video.mp4 --output result.mp4 --bbox-siz
 - Kalman filter smooths the trajectory
 - **Dynamic camera motion tracking** using field features (NEW!)
 - **3D ballistic trajectory fitting** using physics-based model
+- **Ground-level constraint**: First position always starts at height = 0 (NEW!)
 - Real-world position calculation in yards (X, Y, Z coordinates)
 
 ### Phase 3: Visualization with 3D Data
