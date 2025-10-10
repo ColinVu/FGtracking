@@ -1,36 +1,54 @@
 :root{
   --electric-violet: #8000FF; /* main purple (unused) */
-  --french-gray: #C7C6CE; /* light text */
-  --kingfisher: #3B047C; /* deep purple (unused) */
-  --bg: #050614; /* requested background */
+  --french-gray: #C7C6CE;     /* light text */
+  --kingfisher: #3B047C;      /* deep purple (unused) */
+  --bg: #050614;              /* requested background */
   --panel: #0b0c17;
-  --btn-top: #7a12ff; /* requested button color */
+  --btn-top: #7a12ff;         /* requested button color */
   --btn-bottom: #6100cc;
-  --title-color: #a055ff; /* requested title/countdown/result color */
+  --title-color: #a055ff;     /* requested title/countdown/result color */
   --pink: #FF5CA3;
   --light: var(--french-gray);
 }
+
 *{box-sizing:border-box}
 html,body,#root{height:100%}
-.app{min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column}
-.app{min-height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column}
+
+.app{
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  flex-direction:column
+}
+
 body{
   margin:0;
   font-family: 'Press Start 2P', monospace;
   background: linear-gradient(180deg,var(--bg) 0%, #07071a 100%);
   color:var(--light);
 }
+
 .game-window{
   width:720px;
   max-width:95vw;
   background:linear-gradient(180deg,var(--panel), #0b0c17);
-  border:8px solid var(--purple);
+  border:8px solid var(--btn-top); /* use palette var */
   padding:20px;
   box-shadow: 0 8px 0 rgba(0,0,0,0.6);
   image-rendering: pixelated;
 }
+
 .pixelated *{image-rendering: pixelated}
-.title{font-size:24px;margin:8px 0;text-align:center;color:var(--title-color);text-shadow:2px 2px 0 rgba(0,0,0,0.4)}
+
+.title{
+  font-size:24px;
+  margin:8px 0;
+  text-align:center;
+  color:var(--title-color);
+  text-shadow:2px 2px 0 rgba(0,0,0,0.4)
+}
+
 .goal-wrap{
   margin:6px 0;
   display:flex;              /* center the scene box itself */
@@ -43,14 +61,18 @@ body{
   position:relative;
   display:grid;              /* center the inner pixel canvas */
   place-items:center;
-  margin:0 auto;             /* belt & suspenders: center even if display changes */
+  margin:0 auto;             /* center even if display changes */
 }
+
 .pixel-scene{image-rendering: pixelated;width:100%;max-width:420px}
+
 .opening-controls{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
 .opening-controls.centered{flex-direction:column;gap:12px;align-items:center}
-.countdown{display:flex;flex-direction:column;align-items:center;color:var(--accent)}
+
+.countdown{display:flex;flex-direction:column;align-items:center;color:var(--title-color)}
 .countdown.centered{align-items:center}
 .count-label{font-size:14px;color:var(--title-color);margin-bottom:6px}
+
 .btn{
   background: linear-gradient(180deg, var(--btn-top) 0%, var(--btn-bottom) 100%);
   color: #ffffff; /* button text stays white */
@@ -68,26 +90,79 @@ body{
 .btn:active{transform:translateY(3px);box-shadow:0 4px 0 rgba(0,0,0,0.45)}
 .btn.play{padding:14px 22px}
 /* .btn.tryagain intentionally uses the primary .btn styles */
+
 .hud{display:flex;justify-content:center;align-items:center;margin-bottom:12px}
+
+.prompt{border:2px dashed rgba(255,255,255,0.06);padding:14px;display:flex;flex-direction:column;align-items:center;text-align:center}
 .prompt-text{margin-bottom:12px;font-size:12px;line-height:1}
 .prompt-line{margin-bottom:8px}
 .prompt-from{font-weight:700}
-.prompt{border:2px dashed rgba(255,255,255,0.06);padding:14px;display:flex;flex-direction:column;align-items:center;text-align:center}
-.prompt-text{margin-bottom:12px;font-size:12px}
+
 .input-row{display:flex;gap:10px}
-.guess-input{padding:10px;font-family:inherit;font-size:12px;border:2px solid rgba(255,255,255,0.06);background:#0d1630;color:var(--light);width:160px}
+.guess-input{
+  padding:10px;
+  font-family:inherit;
+  font-size:12px;
+  border:2px solid rgba(255,255,255,0.06);
+  background:#0d1630;
+  color:var(--light);
+  width:160px
+}
+
 .hint{font-size:10px;color:rgba(255,255,255,0.45);margin-top:10px}
+
 .result{text-align:center}
 .result h2{color:var(--title-color)}
 .result-detail{margin-top:6px;font-size:12px}
+
 .credit{margin-top:10px;font-size:11px;color:rgba(255,255,255,0.5)}
-.timer{background:rgba(0,0,0,0.2);padding:6px 10px;border-radius:6px;color:var(--accent);font-weight:700}
+
+.timer{
+  background:rgba(0,0,0,0.2);
+  padding:6px 10px;
+  border-radius:6px;
+  color:var(--title-color);
+  font-weight:700
+}
 
 .field-good{font-size:14px;color:var(--french-gray);text-align:center;margin-bottom:8px}
 .field-good-line{margin-bottom:12px}
 .opening-buttons{display:flex;align-items:center;gap:8px}
 .opening-buttons.centered{justify-content:center}
 .missed-text{color:#ffffff;font-size:12px;text-align:center}
+
+/* NEW: stat interstitial + card (palette-only) */
+.fact-screen{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+}
+
+.weekend-stat {
+  margin: 16px auto 0;
+  max-width: 560px;
+  padding: 16px 20px;
+  background: var(--btn-bottom);   /* deep purple from palette */
+  color: #ffffff;                  /* white text */
+  border: 2px solid var(--french-gray); /* <-- gray border now */
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+}
+
+
+.weekend-stat__title{
+  font-weight:800;
+  margin-bottom:6px;
+  letter-spacing:0.3px;
+}
+
+.weekend-stat__body{
+  font-weight:600;
+  line-height:1.35;
+  word-break:keep-all;
+}
 
 @media (max-width:760px){
   .game-window{width:92vw;padding:12px}

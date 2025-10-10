@@ -1,13 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
 
-const PRIZEPICKS_COLORS = {
-  purple: '#5B2E8A',
-  pink: '#FF5CA3',
-  dark: '#0F1226',
-  light: '#F7F7FB',
-  accent: '#00D1B2'
-}
-
 function PixelScene({ scale = 1.5 }) {
   // compact canvas to fit between the title and the lines below
   const s = 8 * scale
@@ -59,11 +51,11 @@ function PixelScene({ scale = 1.5 }) {
   blocks.push(pixel(ax + 6, groundY - 12, 2, 7, post))
 
   return (
-  // full-width staging area the size of the info box row
+    // full-width staging area the size of the info box row
     <div
       style={{
         position: 'relative',
-        width: '100%',           // take the full width of the panel row
+        width: '100%',
         height: `${H * s}px`,
         margin: '0 auto'
       }}
@@ -82,7 +74,7 @@ function PixelScene({ scale = 1.5 }) {
         {blocks}
       </div>
     </div>
- )
+  )
 }
 
 function Timer({ seconds, running, onExpire }) {
@@ -103,7 +95,7 @@ function Timer({ seconds, running, onExpire }) {
       }
     }, 150)
     return () => clearInterval(id)
-  }, [running, seconds])
+  }, [running, seconds, onExpire])
 
   return <div className="timer">{t}s</div>
 }
@@ -111,7 +103,7 @@ function Timer({ seconds, running, onExpire }) {
 export default function App() {
   const [screen, setScreen] = useState('opening')
   const [openingRunning, setOpeningRunning] = useState(true)
-  const [questionRunning, setQuestionRunning] = useState(false)
+  const [questionRunning, setQuestionRunning] = useState(false) // hidden timer gate
   const [score, setScore] = useState(0)
   const [guess, setGuess] = useState('')
   const [actual, setActual] = useState(null)
@@ -119,7 +111,24 @@ export default function App() {
   const [round, setRound] = useState(1)
   const [played, setPlayed] = useState(false)
   const [missed, setMissed] = useState(false)
+
+  // NEW: weekend stat + submit flag
+  const [fact, setFact] = useState(null)
+  const [hasSubmitted, setHasSubmitted] = useState(false)
+
   const inputRef = useRef(null)
+  const questionTimeoutRef = useRef(null) // hidden 30s timer
+
+  // Demo fact pool (2 CFB + 3 NFL, 2025 season)
+  const FACTS_2025 = [
+    // CFB
+    "CFB (2025): Missouri’s Ahmad Hardy led the FBS in rushing early with ~730 yards through September.",
+    "CFB (2025): San José State’s Danny Scudero topped early receiving charts with ~665 yards.",
+    // NFL
+    "NFL (2025): Matthew Stafford opened the year leading the league with ~1,500 passing yards.",
+    "NFL (2025): Jonathan Taylor surged to the early rushing lead with ~480 yards.",
+    "NFL (2025): Puka Nacua paced early NFL receiving with ~580+ yards."
+  ]
 
   useEffect(() => {
     // generate actual (and opening display) between 17 and 70 for demo
@@ -134,11 +143,29 @@ export default function App() {
     setPlayed(true)
     setGuess('')
     setMessage('')
+    setFact(null)
+    setHasSubmitted(false)
     setTimeout(() => inputRef.current && inputRef.current.focus(), 100)
+
+    // start a hidden 30s timeout (no visible timer)
+    if (questionTimeoutRef.current) clearTimeout(questionTimeoutRef.current)
+    questionTimeoutRef.current = setTimeout(() => {
+      // time up => compute correctness and show result
+      endRound()
+    }, 30000)
   }
 
-  function endRound(correct) {
+  function endRound() {
     setQuestionRunning(false)
+    if (questionTimeoutRef.current) {
+      clearTimeout(questionTimeoutRef.current)
+      questionTimeoutRef.current = null
+    }
+
+    // compute correctness at the end of the 30s window
+    const g = parseInt(guess, 10)
+    const correct = !isNaN(g) && g >= actual && g <= actual + 3
+
     setScreen('result')
     if (correct) {
       setScore((s) => s + 10)
@@ -146,8 +173,6 @@ export default function App() {
     } else {
       setMessage('Close but no — try again!')
     }
-    // Do not auto-restart. Game runs only once per requirement.
-    // Keep result on screen and do not schedule another round.
   }
 
   function handleOpeningExpire() {
@@ -166,15 +191,25 @@ export default function App() {
     setQuestionRunning(false)
     setGuess('')
     setMessage('')
+    setFact(null)
+    setHasSubmitted(false)
     // regenerate a new actual
+    if (questionTimeoutRef.current) {
+      clearTimeout(questionTimeoutRef.current)
+      questionTimeoutRef.current = null
+    }
     setActual(17 + Math.floor(Math.random() * (70 - 17 + 1)))
   }
 
   function submitGuess() {
     const g = parseInt(guess, 10)
-    if (isNaN(g)) return
-    const isCorrect = g >= actual && g <= actual + 3
-    endRound(isCorrect)
+    if (isNaN(g) || hasSubmitted) return
+
+    // pick and show the stat *immediately* after answer; no result yet
+    const pick = FACTS_2025[Math.floor(Math.random() * FACTS_2025.length)]
+    setFact(pick)
+    setHasSubmitted(true)
+    setScreen('fact') // mid-screen shown until the 30s timer ends
   }
 
   return (
@@ -203,22 +238,20 @@ export default function App() {
                 <div className="countdown centered">
                   <div className="count-label">Play Game in:</div>
                   <Timer
-                    seconds={10}
+                    seconds={20}               // 20s opening countdown
                     running={openingRunning}
-                    onExpire={() => {
-                      handleOpeningExpire()
-                    }}
+                    onExpire={handleOpeningExpire}
                   />
                 </div>
 
                 <div className="opening-buttons centered">
                   {(!missed && !played) && (
-                    <button className="btn play" onClick={() => startQuestion()}>
+                    <button className="btn play" onClick={startQuestion}>
                       PLAY
                     </button>
                   )}
                   {missed && (
-                    <button className="btn tryagain" onClick={() => resetDemo()}>
+                    <button className="btn tryagain" onClick={resetDemo}>
                       TRY AGAIN
                     </button>
                   )}
@@ -231,13 +264,7 @@ export default function App() {
         {screen === 'question' && (
           <div className="question">
             <div className="hud">
-              <Timer
-                seconds={7}
-                running={questionRunning}
-                onExpire={() => {
-                  endRound(false)
-                }}
-              />
+              {/* Timer intentionally hidden for this phase per requirements */}
             </div>
 
             <div className="prompt">
@@ -257,7 +284,16 @@ export default function App() {
                   Submit
                 </button>
               </div>
-              {/* hint removed for production - actual value hidden */}
+            </div>
+          </div>
+        )}
+
+        {/* Interstitial showing the Weekend Stat while the hidden 30s runs */}
+        {screen === 'fact' && (
+          <div className="fact-screen">
+            <div className="weekend-stat" role="status" aria-live="polite">
+              <div className="weekend-stat__title">Weekend Stat</div>
+              <div className="weekend-stat__body">{fact}</div>
             </div>
           </div>
         )}
@@ -267,8 +303,9 @@ export default function App() {
             <h2>{message}</h2>
             <div className="result-detail">Actual: {actual} yards</div>
             <div className="result-detail">Your guess: {guess || '—'}</div>
+
             <div style={{ marginTop: 12, display: 'flex', justifyContent: 'center' }}>
-              <button className="btn tryagain" onClick={() => resetDemo()}>TRY AGAIN</button>
+              <button className="btn tryagain" onClick={resetDemo}>TRY AGAIN</button>
             </div>
           </div>
         )}
