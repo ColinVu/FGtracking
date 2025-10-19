@@ -115,6 +115,8 @@ export default function App() {
 
   const inputRef = useRef(null);
   const questionTimeoutRef = useRef(null);
+  const submittedGuessRef = useRef(null);
+  const submittedCorrectRef = useRef(null);
 
   const openingT = useCountdown(20, openingRunning, () => {
     setOpeningRunning(false);
@@ -149,6 +151,9 @@ export default function App() {
     setTimeout(() => inputRef.current?.focus(), 100);
 
     if (questionTimeoutRef.current) clearTimeout(questionTimeoutRef.current);
+    // clear any previous submitted value when a new question starts
+    submittedGuessRef.current = null;
+    submittedCorrectRef.current = null;
     questionTimeoutRef.current = setTimeout(() => {
       endRound(); // compute result only when 30s expires
     }, 30000);
@@ -160,8 +165,10 @@ export default function App() {
       clearTimeout(questionTimeoutRef.current);
       questionTimeoutRef.current = null;
     }
-    const g = parseInt(guess, 10);
-    const correct = !isNaN(g) && actual !== null && g >= actual && g <= actual + 3;
+  // prefer the authoritative submitted value (if any)
+  const g = submittedGuessRef.current ?? parseInt(guess, 10);
+  console.log('endRound: guess=', guess, 'g=', g, 'actual=', actual, 'hasSubmitted=', hasSubmitted, 'submittedCorrectRef=', submittedCorrectRef.current);
+  const correct = submittedCorrectRef.current ?? (!isNaN(g) && actual !== null && g >= actual && g <= actual + 3);
 
     setScreen('result');
     if (correct) {
@@ -170,6 +177,10 @@ export default function App() {
     } else {
       setMessage('Close but no — try again!');
     }
+
+    // clear stored submitted values for next round
+    submittedGuessRef.current = null;
+    submittedCorrectRef.current = null;
   }
 
   function resetDemo() {
@@ -187,11 +198,18 @@ export default function App() {
       questionTimeoutRef.current = null;
     }
     setActual(17 + Math.floor(Math.random() * (70 - 17 + 1)));
+    submittedGuessRef.current = null;
+    submittedCorrectRef.current = null;
   }
 
   function submitGuess() {
     const g = parseInt(guess, 10);
     if (isNaN(g) || hasSubmitted) return;
+
+    // stash parsed numeric answer immediately and precompute correctness
+    submittedGuessRef.current = g;
+    submittedCorrectRef.current = (g >= actual && g <= actual + 3);
+    console.log('submitGuess: guess=', guess, 'parsed=', g, 'actual=', actual, 'submittedCorrect=', submittedCorrectRef.current);
 
     const pick = FACTS_2025[Math.floor(Math.random() * FACTS_2025.length)];
     setFact(pick);

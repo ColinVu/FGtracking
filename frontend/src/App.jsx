@@ -118,6 +118,8 @@ export default function App() {
 
   const inputRef = useRef(null)
   const questionTimeoutRef = useRef(null) // hidden 30s timer
+  const submittedGuessRef = useRef(null) // authoritative submitted value to avoid race with timer
+  const submittedCorrectRef = useRef(null) // precomputed correctness at submit time
 
   // Demo fact pool (2 CFB + 3 NFL, 2025 season)
   const FACTS_2025 = [
@@ -149,6 +151,10 @@ export default function App() {
 
     // start a hidden 30s timeout (no visible timer)
     if (questionTimeoutRef.current) clearTimeout(questionTimeoutRef.current)
+    // clear any previous submitted value when a new question starts
+  submittedGuessRef.current = null
+  submittedCorrectRef.current = null
+
     questionTimeoutRef.current = setTimeout(() => {
       // time up => compute correctness and show result
       endRound()
@@ -162,9 +168,13 @@ export default function App() {
       questionTimeoutRef.current = null
     }
 
-    // compute correctness at the end of the 30s window
-    const g = parseInt(guess, 10)
-    const correct = !isNaN(g) && g >= actual && g <= actual + 3
+  // Prefer the authoritative submitted value (if any) to avoid races when
+  // the user clicks Submit near the timeout. If we precomputed correctness
+  // at submit time, prefer that result (it uses the submitted numeric value
+  // and the `actual` that existed when the user submitted).
+  const g = submittedGuessRef.current ?? parseInt(guess, 10)
+  console.log('endRound: guess=', guess, 'g=', g, 'actual=', actual, 'hasSubmitted=', hasSubmitted, 'submittedCorrectRef=', submittedCorrectRef.current)
+  const correct = submittedCorrectRef.current ?? (!isNaN(g) && g >= actual && g <= actual + 3)
 
     setScreen('result')
     if (correct) {
@@ -173,6 +183,10 @@ export default function App() {
     } else {
       setMessage('Close but no — try again!')
     }
+
+    // clear the stored submitted values so next round starts fresh
+    submittedGuessRef.current = null
+    submittedCorrectRef.current = null
   }
 
   function handleOpeningExpire() {
@@ -199,14 +213,21 @@ export default function App() {
       questionTimeoutRef.current = null
     }
     setActual(17 + Math.floor(Math.random() * (70 - 17 + 1)))
+    submittedGuessRef.current = null
+    submittedCorrectRef.current = null
   }
 
   function submitGuess() {
     const g = parseInt(guess, 10)
     if (isNaN(g) || hasSubmitted) return
 
-    // pick and show the stat *immediately* after answer; no result yet
-    const pick = FACTS_2025[Math.floor(Math.random() * FACTS_2025.length)]
+    // stash the parsed numeric answer immediately so the timer can read it
+    submittedGuessRef.current = g
+    // precompute correctness now (uses current `actual` value)
+    submittedCorrectRef.current = (g >= actual && g <= actual + 3)
+    console.log('submitGuess: guess=', guess, 'parsed=', g, 'actual=', actual, 'submittedCorrect=', submittedCorrectRef.current)
+
+    const pick = FACTS_2025[Math.floor(Math.random() * FACTS_2025.length)] // placeholder
     setFact(pick)
     setHasSubmitted(true)
     setScreen('fact') // mid-screen shown until the 30s timer ends
@@ -280,7 +301,7 @@ export default function App() {
                   onChange={(e) => setGuess(e.target.value.replace(/[^0-9]/g, ''))}
                   placeholder="yards (number)"
                 />
-                <button className="btn submit" onClick={submitGuess}>
+                <button className="btn submit" onClick={submitGuess} disabled={hasSubmitted || !/^[0-9]+$/.test(guess)}>
                   Submit
                 </button>
               </div>
